@@ -1,0 +1,272 @@
+﻿#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/types.h>
+#include <linux/fcntl.h>
+#include <linux/mm.h>
+#include <linux/fs.h>
+#include <linux/cdev.h>
+#include <linux/errno.h>
+#include <linux/init.h>
+#include <linux/device.h>
+#include <linux/init.h>
+#include <linux/major.h>
+#include <linux/delay.h>
+#include <linux/io.h>
+#include <asm/uaccess.h>	/* for VERIFY_READ/VERIFY_WRITE/copy_from_user */
+
+#include <mach/regs-gpio.h>
+#include <linux/gpio.h>
+
+#define LED_GPIO_MAX_NUM 4
+
+struct mini2440_led_dev{	
+	struct cdev cdev;
+	unsigned int led_gpio[LED_GPIO_MAX_NUM];
+};
+
+static unsigned int led_gpio_table[LED_GPIO_MAX_NUM] = {
+	S3C2410_GPB(5),
+	S3C2410_GPB(6),
+	S3C2410_GPB(7),
+	S3C2410_GPB(8),
+};
+
+#define BUF_RW_MAX_SIZE 128
+#define MINI2440_LED_NAME "mini2440_led" //新起的名字，避免与原有的LED驱动名字冲突
+#define MINI2440_LED_CMD_0 _IOW('l', 0, int)
+#define MINI2440_LED_CMD_1 _IOW('l', 1, int)
+#define MINI2440_LED_CMD_2 _IOW('l', 2, int)
+#define MINI2440_LED_CMD_3 _IOW('l', 3, int)
+
+static struct mini2440_led_dev *p_mini2440_led_dev;
+
+static struct class * p_mini2440_led_class = NULL;			// 设备类 /sys/class
+static struct device *p_mini2440_led_device = NULL;			// mini2440_led的设备结构
+
+static int mini2440_led_major = 0;     						// 主设备号变量
+static int mini2440_led_minor	  = 0;							// 次设备号变量
+static char buf_rw[BUF_RW_MAX_SIZE] = "mini2440_led is ok";
+
+/*
+ * 模块参数
+ */
+module_param(mini2440_led_major, int, S_IRUGO);
+module_param(mini2440_led_minor, int, S_IRUGO);
+
+static int mini2440_led_open(struct inode *inode, struct file *file)
+{
+	printk("mini2440_led_open\n");
+	return 0;
+}
+/*
+ * @brief			读mini2440_led设备
+ * @param[in]		filp						文件结构
+ * @param[in]		count						读数据的字节数	
+ * @param[out]		buf							输出数据的缓冲区
+ * @param[in|out]	f_pos						文件指针的位置
+ * @return			读取的数据量	
+ *					@li >= 0					读取的字节数目
+ *					@li < 0						错误码
+ */
+ssize_t mini2440_led_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
+{
+	//printk(KERN_WARNING"current: pid= %d\n", current->pid);
+	//printk(KERN_WARNING"current: comm= %s\n", current->comm);
+	printk("mini2440_led_read= %d,%s\n", count,buf_rw);
+  
+  count %= BUF_RW_MAX_SIZE;
+	copy_to_user(buf, buf_rw, count);
+	
+	return 0;
+}
+
+/*
+ * @brief			写mini2440_led设备
+ * @param[in]		filp						文件结构
+ * @param[in]		count						读数据的字节数	
+ * @param[in]		buf							输出数据的缓冲区
+ * @param[in|out]	f_pos						文件指针的位置
+ * @return			写出结果	
+ *					@li >= 0					写入的字节数量
+ *					@li < 0						错误码
+ */
+ssize_t mini2440_led_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos)
+{
+  printk("mini2440_led_write= %d,%s\n", count,buf);
+  
+  count %= BUF_RW_MAX_SIZE;
+	copy_from_user(buf_rw, buf, count);
+	
+	return count;
+}
+
+
+static int mini2440_led_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
+{
+	int led_io_state;
+	void __user *argp = (void __user *)arg;
+	int __user *p = argp;
+	get_user(led_io_state, p);
+	
+	//printk("mini2440_led_ioctl:cmd:%x,led_io_state=%d\n",cmd,led_io_state);
+
+	switch(cmd)
+	{
+		case MINI2440_LED_CMD_0:
+			//printk("MINI2440_LED_CMD_0=%d\n",p_mini2440_led_dev->led_gpio[0]);
+			s3c2410_gpio_setpin(p_mini2440_led_dev->led_gpio[0], led_io_state);
+			break;
+		case MINI2440_LED_CMD_1:
+			//printk("MINI2440_LED_CMD_1=%d\n",p_mini2440_led_dev->led_gpio[1]);
+			s3c2410_gpio_setpin(p_mini2440_led_dev->led_gpio[1], led_io_state);
+			break;
+		case MINI2440_LED_CMD_2:
+			//printk("MINI2440_LED_CMD_2=%d\n",p_mini2440_led_dev->led_gpio[2]);
+			s3c2410_gpio_setpin(p_mini2440_led_dev->led_gpio[2], led_io_state);
+			break;
+		case MINI2440_LED_CMD_3:
+			//printk("MINI2440_LED_CMD_3=%d\n",p_mini2440_led_dev->led_gpio[3]);
+			s3c2410_gpio_setpin(p_mini2440_led_dev->led_gpio[3], led_io_state);
+			break;
+		default:
+			return -ENOTTY;
+	}
+	
+	return 0;
+}
+
+static int mini2440_led_release(struct inode *inode, struct file *file)
+{
+	return 0;
+}
+
+static const struct file_operations mini2440_led_fops = {
+	.owner = THIS_MODULE,
+	.open = mini2440_led_open,
+	.read = mini2440_led_read,
+	.write = mini2440_led_write,
+	.release = mini2440_led_release,
+	.ioctl = mini2440_led_ioctl
+};
+
+static int mini2440_led_setup_cdev(struct mini2440_led_dev *p_mini2440_led_dev, dev_t devno)
+{
+	int ret = 0;
+
+	cdev_init(&p_mini2440_led_dev->cdev, &mini2440_led_fops);
+	p_mini2440_led_dev->cdev.owner = THIS_MODULE;
+	ret = cdev_add(&p_mini2440_led_dev->cdev, devno, 1);
+
+	return ret;
+}
+
+static void mini2440_led_io_init(void)
+{
+		int i = 0;
+		memcpy(p_mini2440_led_dev->led_gpio,led_gpio_table,sizeof(led_gpio_table));
+		
+		for (i = 0; i < LED_GPIO_MAX_NUM; i++) {
+			s3c2410_gpio_cfgpin(p_mini2440_led_dev->led_gpio[i], S3C2410_GPIO_OUTPUT);
+			s3c2410_gpio_setpin(p_mini2440_led_dev->led_gpio[i], 1);
+		}
+}
+
+static int __init mini2440_led_init(void)
+{
+	int ret;
+	dev_t devno;
+
+	printk("mini2440_led_init\n");
+	
+	if(mini2440_led_major)
+	{
+		devno = MKDEV(mini2440_led_major, mini2440_led_minor);
+		ret = register_chrdev_region(devno, 1, MINI2440_LED_NAME);
+	}
+	else
+	{
+		ret = alloc_chrdev_region(&devno, mini2440_led_minor, 1, MINI2440_LED_NAME);
+		mini2440_led_major = MAJOR(devno);
+		
+	}
+	printk("devno:%x, mini2440_led_major:%d\n",devno, mini2440_led_major);
+	
+	if(ret < 0)
+	{
+		printk("get mini2440_led_major fail\n");
+		return ret;
+	}
+	
+	p_mini2440_led_dev = kmalloc(sizeof(struct mini2440_led_dev), GFP_KERNEL);
+	if(!p_mini2440_led_dev)
+	{
+		printk("%s...%d fail \n", __FUNCTION__,__LINE__);
+		ret = -ENOMEM;
+		goto device_kmalloc_fail;
+	}
+
+	memset(p_mini2440_led_dev, 0, sizeof(struct mini2440_led_dev));
+	
+	ret = mini2440_led_setup_cdev(p_mini2440_led_dev, devno);
+	if(ret)
+	{
+		printk("mini2440_led_setup_cdev fail = %d\n",ret);
+		goto cdev_add_fail;
+	}
+	
+	p_mini2440_led_class = class_create(THIS_MODULE, MINI2440_LED_NAME);
+	ret = IS_ERR(p_mini2440_led_class);
+	if(ret)
+	{
+		printk("mini2440_led class_create fail\n");
+		goto class_create_fail;
+	}
+
+	//p_mini2440_led_device = class_device_create(p_mini2440_led_class, NULL, devno, NULL, MINI2440_LED_NAME); // 早期内核版本
+	p_mini2440_led_device = device_create(p_mini2440_led_class, NULL, devno, NULL, MINI2440_LED_NAME);
+	ret = IS_ERR(p_mini2440_led_device);
+	if (ret)
+	{
+		printk(KERN_WARNING "mini2440_led device_create fail, error code %ld", PTR_ERR(p_mini2440_led_device));
+		goto device_create_fail;
+	}
+
+	mini2440_led_io_init();
+	
+	return 0;
+	
+device_create_fail:
+	class_destroy(p_mini2440_led_class);
+class_create_fail:
+	cdev_del(&p_mini2440_led_dev->cdev);
+cdev_add_fail:
+	kfree(p_mini2440_led_dev);
+device_kmalloc_fail:
+	unregister_chrdev_region(devno, 1);
+
+	return ret;
+}
+
+static void __exit mini2440_led_exit(void)
+{
+	dev_t devno;
+	
+	printk("mini2440_led_exit\n");
+	devno = MKDEV(mini2440_led_major, mini2440_led_minor);
+	//class_device_destroy(p_mini2440_led_class, devno); // 早期内核版本
+	device_destroy(p_mini2440_led_class, devno);
+	class_destroy(p_mini2440_led_class);	
+	
+	cdev_del(&p_mini2440_led_dev->cdev);
+	
+	kfree(p_mini2440_led_dev);
+	
+	unregister_chrdev_region(devno, 1);
+}
+
+module_init(mini2440_led_init);
+module_exit(mini2440_led_exit);
+
+MODULE_AUTHOR("shenrt");
+MODULE_DESCRIPTION("mini2440_led Driver");
+MODULE_LICENSE("GPL");
